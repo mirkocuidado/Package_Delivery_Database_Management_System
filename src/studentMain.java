@@ -1,6 +1,7 @@
 
 import rs.etf.sab.operations.*;
-import tests.*;
+import rs.etf.sab.tests.TestHandler;
+import rs.etf.sab.tests.TestRunner;
 import sabprojekat.CuidadoCityOperations;
 import sabprojekat.CuidadoCourierOperations;
 import sabprojekat.CuidadoCourierRequestOperations;

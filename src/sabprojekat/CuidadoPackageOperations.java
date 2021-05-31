@@ -184,45 +184,56 @@ public class CuidadoPackageOperations implements PackageOperations{
         return Math.sqrt(part1 + part2);
     }
     
-    @Override
-    public boolean acceptAnOffer(int idOffer) {
-        Offer currentOffer = null;
-        
-        String sqlQuery = "SELECT KorisnickoIme, IdPaket, Procenat FROM Ponuda WHERE IdPonuda=?";
+    private Offer getCurrentOfferForThisID(int idOffer) {
+        final String sqlQuery = "SELECT KorisnickoIme, IdPaket, Procenat FROM Ponuda WHERE IdPonuda=?";
         try(PreparedStatement ps = connection.prepareStatement(sqlQuery);) {
             ps.setInt(1, idOffer);
             try(ResultSet rs = ps.executeQuery();) {
                 if(rs.next()) {
-                    currentOffer = new Offer(rs.getString("KorisnickoIme"), rs.getInt("IdPaket"), rs.getBigDecimal("Procenat").doubleValue());
+                    return new Offer(rs.getString("KorisnickoIme"), rs.getInt("IdPaket"), rs.getBigDecimal("Procenat").doubleValue());
                 }
             }
         } 
         catch (SQLException ex) {
             Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
         }
-        
-        if(currentOffer == null) return false;
-        
-        sqlQuery = "UPDATE Paket SET StatusIsporuke=1, VremePrihvatanja=GETDATE(), Cena=?, Kurir=? WHERE IdPaket=?";
+        return null;
+    }
+    
+    private boolean increaseNumberOfSentPackages(int idPaket) {
+        final String sqlQuery = "UPDATE Korisnik SET BrojPoslatihPaketa=BrojPoslatihPaketa+1 WHERE KorisnickoIme=(SELECT KorisnikPosaljilac FROM Paket WHERE IdPaket=?)";
+        try (PreparedStatement ps3 = connection.prepareStatement(sqlQuery)) {
+            ps3.setInt(1, idPaket);
+            return ps3.executeUpdate() == 1;
+        } 
+        catch (SQLException ex) {
+            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return false;
+    }
+    
+    private boolean updateStatusOfPackageToBePickedUp(Offer currentOffer) {
+        final String sqlQuery = "UPDATE Paket SET StatusIsporuke=1, VremePrihvatanja=GETDATE(), Cena=?, Kurir=? WHERE IdPaket=?";
         try(PreparedStatement ps = connection.prepareStatement(sqlQuery);) {
             ps.setBigDecimal(1, calculatePrice(currentOffer.getIdPackage(), currentOffer.getPercentage()));
             ps.setString(2, currentOffer.getCourierUsername());
             ps.setInt(3, currentOffer.getIdPackage());
             int numRows = ps.executeUpdate();
             if(numRows != 1) return false;
-            else {
-                sqlQuery = "UPDATE Korisnik SET BrojPoslatihPaketa=BrojPoslatihPaketa+1 WHERE KorisnickoIme=(SELECT KorisnikPosaljilac FROM Paket WHERE IdPaket=?)";
-                try (PreparedStatement ps3 = connection.prepareStatement(sqlQuery)) {
-                    ps3.setInt(1, currentOffer.getIdPackage());
-                    return ps3.executeUpdate() == 1;
-                }
-            }
+            else return increaseNumberOfSentPackages(currentOffer.getIdPackage());
         } 
         catch (SQLException ex) {
             Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
         }
-        
         return false;
+    }
+    
+    @Override
+    public boolean acceptAnOffer(int idOffer) {
+        Offer currentOffer = getCurrentOfferForThisID(idOffer);
+        if(currentOffer == null) return false;
+
+        return updateStatusOfPackageToBePickedUp(currentOffer);
     }
 
     @Override
@@ -272,7 +283,7 @@ public class CuidadoPackageOperations implements PackageOperations{
         return false;
     }
 
-    @Override // proveri da ne zeli da menja tezinu paketa koji je vec pokupljen i to!
+    @Override // proveri da ne zeli da menja tezinu paketa koji je vec pokupljen i to na javnom ili tajnom testu!
     public boolean changeWeight(int idPaket, BigDecimal newWeight) {
         if (newWeight.doubleValue() < 0.0) return false;
         final String sqlQuery = "UPDATE Paket SET TezinaPaketa=? WHERE IdPaket=?";
@@ -287,7 +298,7 @@ public class CuidadoPackageOperations implements PackageOperations{
         return false;
     }
 
-    @Override // proveri da ne zeli da menja tezinu paketa koji je vec pokupljen i to!
+    @Override // proveri da ne zeli da menja tezinu paketa koji je vec pokupljen i to na javnom ili tajnom testu!
     public boolean changeType(int idpaket, int newType) {
         if (newType < 0 || newType > 2) return false;
         final String sqlQuery = "UPDATE Paket SET TipPaketa=? WHERE IdPaket=?";
@@ -419,6 +430,40 @@ public class CuidadoPackageOperations implements PackageOperations{
 	return null;	
     }
 
+    private void updateCurrentCourierStatusToDriving(String usernameCourier) throws SQLException {
+        final String sqlQuery = "UPDATE Kurir SET Status=1 WHERE KorisnickoIme=?";
+	try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            if(ps.executeUpdate() != 1) throw new SQLException("Exception at -> updateCurrentCourierStatusToDriving()");
+        }	
+    }
+    
+    private void updateAllPackagesOfCurrentCourierToPickedUp(String usernameCourier) throws SQLException {
+        final String sqlQuery = "UPDATE Paket SET StatusIsporuke=2 WHERE StatusIsporuke=1 AND Kurir=?";
+        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            if( ps.executeUpdate() == 0) throw new SQLException("Exception at -> updateAllPackagesOfCurrentCourierToPickedUp()");
+        }
+    }
+
+    private void addAllPackagesToBeDriven(String usernameCourier) throws SQLException {
+        final String sqlQuery = "SELECT IdPaket FROM Paket WHERE StatusIsporuke=2 AND Kurir=?";
+        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int idPaket = rs.getInt("IdPaket");
+                    final String sqlQuery2 = "INSERT INTO Voznja(KorisnickoIme, IdPaket) VALUES (?, ?)";
+                    try (PreparedStatement ps2 = connection.prepareStatement(sqlQuery2)) {
+                        ps2.setString(1, usernameCourier);
+                        ps2.setInt(2, idPaket);
+                        if (ps2.executeUpdate() == 0) throw new SQLException("Exception at -> addAllPackagesToBeDriven()");
+                    }
+                }
+            }
+        }
+    }
+    
     public boolean startDrive(String usernameCourier) {
         try {
             updateCurrentCourierStatusToDriving(usernameCourier);
@@ -431,83 +476,70 @@ public class CuidadoPackageOperations implements PackageOperations{
         return true;
     }
 
-    private void updateCurrentCourierStatusToDriving(String usernameCourier) throws SQLException {
-        final String sqlQuery = "UPDATE Kurir SET Status=1 WHERE KorisnickoIme=?";
-	try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            if(ps.executeUpdate() != 1) throw new SQLException("Exception at -> updateCurrentCourierStatusToDriving()");
-        }	
-    }
-
-    @Override
-    public int driveNextPackage(String usernameCourier) {
-        String sqlQuery = "SELECT Status FROM Kurir WHERE KorisnickoIme=?";
+    private int ifTheCourierIsNotDrivingSetHimToDrive(String usernameCourier) {
+        final String sqlQuery = "SELECT Status FROM Kurir WHERE KorisnickoIme=?";
         try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
             ps.setString(1, usernameCourier);
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    if(rs.getInt("Status") != 1) {
-                        if(startDrive(usernameCourier) == false)
-                            return -2;
-                    }
-                }
+                if (rs.next() && rs.getInt("Status") !=1) 
+                    if(startDrive(usernameCourier) == false) return -2;
             }
         } 
         catch (SQLException ex) {
             Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
             return -2;
         }
-        
-        sqlQuery = "SELECT TOP 1 IdPaket FROM Paket WHERE Kurir=? AND StatusIsporuke=2 ORDER BY VremePrihvatanja";
+        return 100;
+    }
+    
+    private int getNextPackageInFCFSOrder(String usernameCourier) {
+        String sqlQuery = "SELECT TOP 1 IdPaket FROM Paket WHERE Kurir=? AND StatusIsporuke=2 ORDER BY VremePrihvatanja";
         try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
             ps.setString(1, usernameCourier);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     int idPaket = rs.getInt("IdPaket");
-                    if(!deliverCurrentPackage(idPaket)) return -2;
-                    if(!updateTotalNumberOfPackagesDelievered(usernameCourier)) return -2;
-                    if(!hasMorePackages(usernameCourier)) {
-                        if(!stopDrive(usernameCourier)) return -2;
-                    }
                     return idPaket;
                 }
                 else {
-                    if(!stopDrive(usernameCourier)) return -2;
+                    if(!stopDrive(usernameCourier)) return -100;
                     return -1;
                 }
             }
-        } 
+        }
         catch (SQLException ex) {
             Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
         }
-        return -2;
+        return -100;
     }
-
-    private boolean deliverCurrentPackage(int idPaket) {
+    
+    private boolean deliverCurrentPackageBySettingHisStatusToDelieveredAndIncreasingCourierNumberOfPackagesByOne(int idPaket, String usernameCourier) {
+        boolean successfulStatusUpdate = false;
         final String sqlQuery = "UPDATE Paket SET StatusIsporuke=3 WHERE IdPaket=?";
 	try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
             ps.setInt(1, idPaket);
-            return (ps.executeUpdate() == 1); 
+            successfulStatusUpdate = (ps.executeUpdate() == 1);
+        } 
+        catch (SQLException ex) {
+            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
+            return false;
+        }
+       
+        if(successfulStatusUpdate == false) return false;
+        
+        final String sqlQuery2 = "UPDATE Kurir SET BrojPaketa=BrojPaketa+1 WHERE KorisnickoIme=?";
+        try (PreparedStatement ps2 = connection.prepareStatement(sqlQuery2)) {
+            ps2.setString(1, usernameCourier);
+            return (ps2.executeUpdate() == 1); 
         } 
         catch (SQLException ex) {
             Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
         }
         return false;
+        
     }
-
-    private boolean updateTotalNumberOfPackagesDelievered(String usernameCourier) {
-        final String sqlQuery = "UPDATE Kurir SET BrojPaketa=BrojPaketa+1 WHERE KorisnickoIme=?";
-        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            return (ps.executeUpdate() == 1); 
-        } 
-        catch (SQLException ex) {
-            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
-        }
-        return false;
-    }
-
-    private boolean hasMorePackages(String usernameCourier) {
+    
+    private boolean isThereMorePackagesToBeDrivenByThisCourier(String usernameCourier) {
         final String sqlQuery = "SELECT TOP 1 IdPaket FROM Paket WHERE Kurir=? AND StatusIsporuke=2";
         try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
             ps.setString(1, usernameCourier);
@@ -520,40 +552,129 @@ public class CuidadoPackageOperations implements PackageOperations{
         }
         return false;
     }
-
+    
     private boolean stopDrive(String usernameCourier) {
-        boolean b1 = updateProfitForCurrentCourier(usernameCourier);
-        if(!b1) return false;
-        b1 = deleteDriveForCurrentCourier(usernameCourier);
-        if(!b1) return false;
-        else return true;
+        boolean successfulUpdateOfCurrentCourier = updateProfitForCurrentCourier(usernameCourier);
+        if(!successfulUpdateOfCurrentCourier) return false;
+        boolean successfulDeleteOfCurrentDrive = deleteDriveForCurrentCourier(usernameCourier);
+        return successfulDeleteOfCurrentDrive;
+    }
+    
+    @Override
+    public int driveNextPackage(String usernameCourier) {
+        if( ifTheCourierIsNotDrivingSetHimToDrive(usernameCourier)!=100 ) return -2;
+        
+        int idPaket = getNextPackageInFCFSOrder(usernameCourier);
+        if(idPaket == -100) return -2;
+        else if(idPaket == -1) return -1;
+        
+        if(!deliverCurrentPackageBySettingHisStatusToDelieveredAndIncreasingCourierNumberOfPackagesByOne(idPaket, usernameCourier)) return -2;
+        
+        if(!isThereMorePackagesToBeDrivenByThisCourier(usernameCourier)) {
+            if(!stopDrive(usernameCourier)) return -2;
+        }
+        
+        return idPaket;
     }
 
+    private BigDecimal caclulateProfitForCurrentCourier(String usernameCourier) {
+        final String sqlQuery = "SELECT Paket.IdOpstinaOd, Paket.IdOpstinaDo, Paket.Cena FROM Voznja, Paket WHERE Voznja.IdPaket=Paket.IdPaket AND Voznja.KorisnickoIme=?";
+        double profit = 0.0;
+        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            try (ResultSet rs = ps.executeQuery()) {
+                while(rs.next()) {
+                    profit += rs.getBigDecimal("Cena").doubleValue();
+                }
+                return new BigDecimal(profit);
+            }
+        }
+        catch (SQLException ex) {
+            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return null;
+    }
+    
+    private LossDetails findOutWhatPredefinedValuesAreUsedForLoss(String usernameCourier) {
+        final String sqlQuery = "SELECT Vozilo.Potrosnja, Vozilo.TipGoriva FROM Kurir, Vozilo WHERE Kurir.RegistarskiBroj=Vozilo.RegistarskiBroj AND KorisnickoIme=?";
+        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    int fuelType = rs.getInt("TipGoriva");
+                    double fuel = rs.getBigDecimal("Potrosnja").doubleValue();
+                    switch(fuelType) {
+                        case 0: return new LossDetails(fuel, 15.0);
+                        case 1: return new LossDetails(fuel, 32.0);
+                        case 2: return new LossDetails(fuel, 36.0);
+                    }
+                }
+            }
+        } 
+        catch (SQLException ex) {
+            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return null;
+    }
+    
+    private BigDecimal calculateLossBetweenEachTwoDistrictsOnTheRoad(String usernameCourier, LossDetails lossDetails) {
+        final String sqlQuery = "SELECT Paket.IdOpstinaOd, Paket.IdOpstinaDo FROM Voznja, Paket WHERE Voznja.IdPaket=Paket.IdPaket AND Voznja.KorisnickoIme=? ORDER BY Paket.VremePrihvatanja";
+        double totalLoss = 0.0;
+        
+        DistrictLocationDetails districtCurrent = null;
+    
+        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
+            ps.setString(1, usernameCourier);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int o1 = rs.getInt("IdOpstinaOd");
+                    DistrictLocationDetails d1 = getCoordinates(o1);
+                    if(d1 == null) return null;
+                    
+                    int o2 = rs.getInt("IdOpstinaDo");
+                    DistrictLocationDetails d2 = getCoordinates(o2);
+                    if(d2 == null) return null;
+                    
+                    if(districtCurrent != null) {
+                        BigDecimal euclid = new BigDecimal(calculateEuclid(districtCurrent, d1));
+                        totalLoss += euclid.doubleValue() * lossDetails.getFuel() * lossDetails.getPerL();
+                    }
+                    
+                    BigDecimal euclid = new BigDecimal(calculateEuclid(d1, d2));
+                    totalLoss += euclid.doubleValue() * lossDetails.getFuel() * lossDetails.getPerL();
+                    
+                    districtCurrent = d2;
+                }
+                return new BigDecimal(totalLoss);
+            }
+        } 
+        catch (SQLException ex) {
+            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return null;
+    }
+    
+    private BigDecimal caclulateLossForCurrentCourier(String usernameCourier) {
+        LossDetails lossDetailsForLoss = findOutWhatPredefinedValuesAreUsedForLoss(usernameCourier);
+        return calculateLossBetweenEachTwoDistrictsOnTheRoad(usernameCourier, lossDetailsForLoss);
+    }
+    
     private boolean updateProfitForCurrentCourier(String usernameCourier) {
         final String sqlQuery = "UPDATE Kurir SET Status=0, Profit=Profit+? WHERE KorisnickoIme=?";
         try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
             
             // izracunaj profit za kurira
-            final String sqlQuery2 = "SELECT Paket.IdOpstinaOd, Paket.IdOpstinaDo, Paket.Cena FROM Voznja, Paket WHERE Voznja.IdPaket=Paket.IdPaket AND Voznja.KorisnickoIme=?";
-            double profit = 0.0;
-            try (PreparedStatement ps2 = connection.prepareStatement(sqlQuery2)) {
-                ps2.setString(1, usernameCourier);
-                try (ResultSet rs = ps2.executeQuery()) {
-                    while(rs.next()) {
-                        profit += rs.getBigDecimal("Cena").doubleValue();
-                    }
-                }
-            }
-            catch (SQLException ex) {
-                Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
-            }
+            BigDecimal profit = caclulateProfitForCurrentCourier(usernameCourier);
+            if(profit == null) return false;
             
             // izracunaj gubitak za kurira
-            BigDecimal loss = getLoss(usernameCourier);
+            BigDecimal loss = caclulateLossForCurrentCourier(usernameCourier);
             if(loss == null) return false;
-            profit -= loss.doubleValue();
             
-            ps.setBigDecimal(1, new BigDecimal(profit));
+            // izracunaj pravi profit
+            double realProfitValue = profit.doubleValue() - loss.doubleValue();
+            
+            ps.setBigDecimal(1, new BigDecimal(realProfitValue));
             ps.setString(2, usernameCourier);
             return ps.executeUpdate() == 1;
         } 
@@ -574,99 +695,4 @@ public class CuidadoPackageOperations implements PackageOperations{
         }
         return false;
     }
-
-    private BigDecimal getLoss(String usernameCourier) {
-        LossDetails ld = null;
-        String sqlQuery = "SELECT Vozilo.Potrosnja, Vozilo.TipGoriva FROM Kurir, Vozilo WHERE Kurir.RegistarskiBroj=Vozilo.RegistarskiBroj AND KorisnickoIme=?";
-        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    int fuelType = rs.getInt("TipGoriva");
-                    double fuel = rs.getBigDecimal("Potrosnja").doubleValue();
-                    switch(fuelType) {
-                        case 0: {
-                            ld = new LossDetails(fuel, 15.0);
-                            break;
-                        }
-                        case 1: {
-                            ld = new LossDetails(fuel, 32.0);
-                            break;
-                        }
-                        case 2: {
-                            ld = new LossDetails(fuel, 36.0);
-                            break;
-                        }
-                    }
-                }
-            }
-        } 
-        catch (SQLException ex) {
-            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
-        }
-    
-        sqlQuery = "SELECT Paket.IdOpstinaOd, Paket.IdOpstinaDo FROM Voznja, Paket WHERE Voznja.IdPaket=Paket.IdPaket AND Voznja.KorisnickoIme=? ORDER BY Paket.VremePrihvatanja";
-        double totalLoss = 0.0;
-        
-        DistrictLocationDetails districtCurrent = null;
-    
-        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    int o1 = rs.getInt("IdOpstinaOd");
-                    DistrictLocationDetails d1 = getCoordinates(o1);
-                    if(d1 == null) return null;
-                    int o2 = rs.getInt("IdOpstinaDo");
-                    DistrictLocationDetails d2 = getCoordinates(o2);
-                    if(d2 == null) return null;
-                    
-                    if(districtCurrent != null) {
-                        BigDecimal euclid = new BigDecimal(calculateEuclid(districtCurrent, d1));
-                        totalLoss += euclid.doubleValue() * ld.getFuel() * ld.getPerL();
-                    }
-                    BigDecimal euclid = new BigDecimal(calculateEuclid(d1, d2));
-                    totalLoss += euclid.doubleValue() * ld.getFuel() * ld.getPerL();
-                    
-                    districtCurrent = d2;
-                }
-                return new BigDecimal(totalLoss);
-            }
-        } 
-        catch (SQLException ex) {
-            Logger.getLogger(CuidadoPackageOperations.class.getName()).log(Level.SEVERE, null, ex);
-        }
-        return null;
-    }
-
-    private void updateAllPackagesOfCurrentCourierToPickedUp(String usernameCourier) throws SQLException {
-        final String sqlQuery = "UPDATE Paket SET StatusIsporuke=2 WHERE StatusIsporuke=1 AND Kurir=?";
-        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            if( ps.executeUpdate() == 0) throw new SQLException("Nothing to update!");
-        }
-    }
-
-    private void addAllPackagesToBeDriven(String usernameCourier) throws SQLException {
-        final String sqlQuery = "SELECT IdPaket FROM Paket WHERE StatusIsporuke=2 AND Kurir=?";
-        try (PreparedStatement ps = connection.prepareStatement(sqlQuery)) {
-            ps.setString(1, usernameCourier);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    int idPaket = rs.getInt("IdPaket");
-                    final String sqlQuery2 = "INSERT INTO Voznja(KorisnickoIme, IdPaket) VALUES (?, ?)";
-                    try (PreparedStatement ps2 = connection.prepareStatement(sqlQuery2)) {
-                        ps2.setString(1, usernameCourier);
-                        ps2.setInt(2, idPaket);
-                        if (ps2.executeUpdate() == 0) throw new SQLException("Nothing to insert!");
-                    }
-                }
-            }
-        }
-    }
-    
-    
-
-
-    
 }
