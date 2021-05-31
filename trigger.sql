@@ -1,34 +1,39 @@
-CREATE TRIGGER TR_TransportOffer_OfferAccepted 
+IF EXISTS ( SELECT * FROM sys.objects WHERE TYPE='TR' AND NAME='TR_TransportOffer_TriggerForWhenAnOfferHasBeenAccepted')
+	DROP TRIGGER TR_TransportOffer_TriggerForWhenAnOfferHasBeenAccepted;
+GO
+
+CREATE TRIGGER TR_TransportOffer_TriggerForWhenAnOfferHasBeenAccepted
    ON  Paket 
    AFTER UPDATE
 AS 
 BEGIN
 	SET NOCOUNT ON
 
-	DECLARE @CursorPaket CURSOR
+	DECLARE @CursorForPaket CURSOR
 	DECLARE @IdPaket INT
 
-	SET @CursorPaket = CURSOR FOR
+	SET @CursorForPaket = CURSOR FOR
 	SELECT IdPaket
 	FROM inserted
-	WHERE StatusIsporuke=1
+	WHERE StatusIsporuke = 1
 
-	OPEN @CursorPaket
+	OPEN @CursorForPaket
 
-	FETCH NEXT FROM @CursorPaket
+	FETCH NEXT FROM @CursorForPaket
 	INTO @IdPaket
 
 	WHILE @@FETCH_STATUS = 0
 	BEGIN
-		-- Delete all the offers for the package
-		DELETE FROM Ponuda
-		WHERE IdPaket=@IdPaket
 
-		FETCH NEXT FROM @CursorPaket
+		DELETE FROM Ponuda
+		WHERE IdPaket = @IdPaket
+
+		FETCH NEXT FROM @CursorForPaket
 		INTO @IdPaket
 	END
 
-	CLOSE @CursorPaket
-	DEALLOCATE @CursorPaket
+	CLOSE @CursorForPaket
+	DEALLOCATE @CursorForPaket
 END
 GO
+
